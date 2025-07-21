@@ -1,2 +1,2 @@
-# StickPalBot
-A Telegram bot that creates new sticker packs from stickers you send it.
+# StickPalBot 🤖
+A Telegram bot that lets you build your own sticker pack from your favorite stickers.
