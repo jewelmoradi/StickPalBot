@@ -1,0 +1,12 @@
+# Ignore virtual environment
+.venv/
+
+# Ignore secret env file
+.env
+
+# Ignore Python junk
+__pycache__/
+*.py[cod]
+
+# Optional: ignore PyCharm config
+.idea/
