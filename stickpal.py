@@ -1,7 +1,20 @@
+import logging
 import os
+
 from dotenv import load_dotenv
-from telegram import InputSticker, Update, Sticker
-from telegram.error import BadRequest
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputSticker,
+    Sticker,
+    Update,
+)
+
+from telegram.error import (
+    BadRequest,
+    TelegramError,
+)
+
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -10,17 +23,20 @@ from telegram.ext import (
     filters
 )
 
+# load environment variables
 load_dotenv()  # loads the token from .env
 TOKEN = os.getenv("BOT_TOKEN")
 
 # global settings
 PACK_TITLE = "My Favorite Stickers ✨"
+FALLBACK_EMOJI = "🌟"
 
-PACK_FORMATS = {
-    "static": "static",
-    "animated": "animated",
-    "video": "video",
-}
+# logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 
 def get_sticker_format(sticker: Sticker) -> str:
@@ -35,18 +51,17 @@ def get_sticker_format(sticker: Sticker) -> str:
     return "static"
 
 
-def get_pack_name(format_name: str, bot_username: str) -> str:
+def get_pack_name(bot_username: str) -> str:
     """Create the unique Telegram sticker-set short name."""
 
     username = bot_username.removeprefix("@").lower()
+    return f"favs_by_{username}"
 
-    return f"favs_{format_name}_by_{username}"
 
-
-def get_pack_title(format_name: str) -> str:
+def get_pack_title() -> str:  # to be updated in the next versions
     """Create the human-readable sticker-set title."""
 
-    return f"{PACK_TITLE} — {PACK_FORMATS[format_name]}"
+    return PACK_TITLE
 
 
 async def pack_exists(context: ContextTypes.DEFAULT_TYPE, pack_name: str) -> bool:
@@ -63,31 +78,35 @@ async def pack_exists(context: ContextTypes.DEFAULT_TYPE, pack_name: str) -> boo
         raise
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hi!👋\n\n"
-        "Send me a sticker and I'll add it to your StickPal favorites!"
-    )
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(
+            "Hi! 👋\n\n"
+            "Send me a sticker and I'll add it to your StickPal favorites!"
+        )
 
 
-async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create the favorites pack if needed and add the sticker."""
+
+    if not update.message or not update.message.sticker:
+        return
 
     sticker: Sticker = update.message.sticker
-    sticker_format = get_sticker_format(sticker)
     bot_username = context.bot.username
 
     if not bot_username:
         await update.message.reply_text("❌ I couldn't determine my bot username.")
         return
 
-    pack_name = get_pack_name(sticker_format, bot_username)
-    pack_title = get_pack_title(sticker_format)
-    emoji = sticker.emoji or "🌟"
+    pack_name = get_pack_name(bot_username)
+    pack_title = get_pack_title()
+    emoji = sticker.emoji or FALLBACK_EMOJI
 
     input_sticker = InputSticker(
         sticker=sticker.file_id,
         emoji_list=[emoji],
-        format=sticker_format,
+        format=get_sticker_format(sticker),
     )
 
     try:
@@ -102,9 +121,8 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 stickers=[input_sticker],
             )
 
-            await update.message.reply_text(
-                f"✅ Created your {sticker_format} sticker pack "
-                f"and added the sticker!"
+            message = (
+                f"✅ Created your sticker pack and added the sticker!"
             )
 
         else:
@@ -115,14 +133,46 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sticker=input_sticker,
             )
 
-            await update.message.reply_text(
-                f"✅ Added the sticker to your {sticker_format} favorites!"
+            message = (
+                f"✅ Added the sticker to your favorites!"
             )
 
-    except Exception as error:
-        await update.message.reply_text(
-            f"❌ Something went wrong:\n{error}"
+        # create a link to the sticker pack.
+        pack_url = f"https://t.me/addstickers/{pack_name}"
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔗 Open pack",
+                        url=pack_url,
+                    )
+                ]
+            ]
         )
+
+        # send the appropriate success message with the pack link
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+        )
+
+    except TelegramError:
+        logger.exception("Telegram operation failed")
+
+        try:
+            await update.message.reply_text(
+                "❌ I couldn't complete that Telegram operation. Please try again."
+            )
+        except TelegramError:
+            logger.exception("Failed to send the error message.")
+
+
+def main() -> None:
+    """Configure and run the bot."""
+
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing. Check your .env file.")
 
 
 # setting up the application
@@ -130,4 +180,8 @@ app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
 
+logger.info("StickPalBot is starting...")
 app.run_polling()
+
+if __name__ == "__main__":
+    main()
