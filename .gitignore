@@ -10,3 +10,8 @@ __pycache__/
 
 # Optional: ignore PyCharm config
 .idea/
+
+# Local SQLite database
+stickpal.db
+stickpal.db-shm
+stickpal.db-wal

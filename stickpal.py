@@ -1,6 +1,7 @@
 import logging
 import os
 
+from database import initialize_database, register_user
 from dotenv import load_dotenv
 from telegram import (
     InlineKeyboardButton,
@@ -78,7 +79,12 @@ async def pack_exists(context: ContextTypes.DEFAULT_TYPE, pack_name: str) -> boo
         raise
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    """Register the user and show the welcome message."""
+
+    if update.effective_user:
+        register_user(update.effective_user.id)
+
     if update.message:
         await update.message.reply_text(
             "Hi! 👋\n\n"
@@ -91,6 +97,9 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not update.message or not update.message.sticker:
         return
+
+    if update.effective_user:
+        register_user(update.effective_user.id)
 
     sticker: Sticker = update.message.sticker
     bot_username = context.bot.username
@@ -174,14 +183,16 @@ def main() -> None:
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Check your .env file.")
 
+    initialize_database()
 
-# setting up the application
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
+    # setting up the application
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
 
-logger.info("StickPalBot is starting...")
-app.run_polling()
+    logger.info("StickPalBot is starting...")
+    app.run_polling()
+
 
 if __name__ == "__main__":
     main()
