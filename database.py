@@ -1,4 +1,3 @@
-import hashlib
 import re
 import sqlite3
 from contextlib import closing
@@ -8,7 +7,7 @@ DATABASE_FILE = Path(__file__).resolve().parent / "stickpal.db"
 
 
 def get_connection():
-    """Create a database connection with useful SQLite settings."""
+    """Create a SQLite connection with foreign keys enabled."""
 
     connection = sqlite3.connect(DATABASE_FILE)
     connection.row_factory = sqlite3.Row
@@ -17,7 +16,7 @@ def get_connection():
 
 
 def initialize_database():
-    """Create the database tables and constraints if needed."""
+    """Create the tables and indexes needed by StickPalBot."""
 
     with closing(get_connection()) as connection:
         connection.execute(
@@ -36,19 +35,28 @@ def initialize_database():
                 pack_name TEXT NOT NULL,
                 pack_title TEXT NOT NULL,
                 telegram_short_name TEXT NOT NULL UNIQUE,
-                FOREIGN KEY (user_id)
-                    REFERENCES users(user_id)
-                    ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             )
             """
         )
 
-        # Each user can have a particular internal pack name only once.
+        # each user can have a particular internal pack name only once
         connection.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS
-                idx_packs_user_pack_name
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_packs_user_pack_name
             ON packs(user_id, pack_name)
+            """
+        )
+
+        # we need to remember which pack each user has selected
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS selected_packs (
+                user_id INTEGER PRIMARY KEY,
+                pack_id INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (pack_id) REFERENCES packs(id) ON DELETE CASCADE
+            )
             """
         )
 
@@ -61,58 +69,47 @@ def register_user(user_id: int) -> None:
     with closing(get_connection()) as connection:
         connection.execute(
             """
-            INSERT OR IGNORE INTO users (user_id)
-            VALUES (?)
+            INSERT OR IGNORE INTO users (user_id) VALUES (?)
             """,
             (user_id,),
         )
         connection.commit()
 
 
-def normalize_pack_name(name: str) -> str:
-    """Convert a pack name into a safe internal identifier."""
+def normalize_pack_name(title: str) -> str:
+    """Convert a pack's visible title into a safe internal identifier."""
 
-    normalized = re.sub(r"[^a-z0-9]+", "_", name.lower())
-    normalized = normalized.strip("_")
-
-    if not normalized:
-        raise ValueError(
-            "The pack name must contain English letters or digits."
-        )
-
-    return normalized
+    normalized = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+    return (normalized or "sticker_pack")[:32].rstrip("_") or "sticker_pack"
 
 
 def generate_telegram_short_name(pack_name: str, user_id: int, bot_username: str,) -> str:
     """Generate a unique, valid Telegram sticker-set short name."""
 
-    slug = normalize_pack_name(pack_name)
     username = bot_username.removeprefix("@").lower()
 
-    if not username:
-        raise ValueError("The bot username cannot be empty.")
+    if not username or not re.fullmatch(r"[a-z0-9_]+", username):
+        raise ValueError("The bot username is invalid.")
 
     # Telegram requires this suffix for bot-created sticker sets
-    ending = f"_{user_id}_by_{username}"
-    available_length = 64 - len(ending)
+    suffix = f"_{user_id}_by_{username}"
+    available_length = 64 - len(suffix)
 
-    if available_length < 7:
+    if available_length < 1:
         raise ValueError("The generated Telegram short name would be too long.")
 
-    if len(slug) > available_length:  # keep long names within Telegram's 64-character limit
-        digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:6]  # the hash helps distinguish different long names
+    slug = pack_name[:available_length].rstrip("_") or "p"
+    short_name = f"{slug}{suffix}"
 
-        prefix_length = available_length - 7
-        prefix = slug[:prefix_length].rstrip("_")
-        slug = f"{prefix}_{digest}"
+    if len(short_name) > 64:  # keep long names within Telegram's 64-character limit
+        raise ValueError("The Telegram short name would be too long.")
 
-    return f"{slug}{ending}"
+    return short_name
 
 
-def create_pack(user_id: int, pack_name: str, pack_title: str, bot_username: str,) -> dict:
-    """Save a named pack belonging to a particular user."""
+def create_pack(user_id: int, pack_title: str, bot_username: str,) -> dict:
+    """Create a named pack belonging to a particular user, automatically suffixing duplicate slugs."""
 
-    pack_name = normalize_pack_name(pack_name)
     pack_title = pack_title.strip()
 
     if not pack_title:
@@ -123,81 +120,62 @@ def create_pack(user_id: int, pack_name: str, pack_title: str, bot_username: str
             "The pack title cannot exceed 64 characters."
         )
 
-    telegram_short_name = generate_telegram_short_name(pack_name=pack_name, user_id=user_id, bot_username=bot_username,)
-
     register_user(user_id)
+    base_name = normalize_pack_name(pack_title)
 
-    try:
-        with closing(get_connection()) as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO packs (
-                    user_id,
-                    pack_name,
-                    pack_title,
-                    telegram_short_name
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    pack_name,
-                    pack_title,
-                    telegram_short_name,
-                ),
+    with closing(get_connection()) as connection:
+        for number in range(1, 10000):
+            candidate = (
+                base_name if number == 1
+                else f"{base_name[:26].rstrip('_')}{number}"
             )
 
-            connection.commit()
+            exists = connection.execute(
+                """
+                SELECT 1 FROM packs
+                WHERE user_id = ? AND pack_name = ?
+                """,
+                (user_id, candidate),
+            ).fetchone()
 
-            return {
-                "id": cursor.lastrowid,
-                "user_id": user_id,
-                "pack_name": pack_name,
-                "pack_title": pack_title,
-                "telegram_short_name": telegram_short_name,
-            }
+            if exists:
+                continue
 
-    except sqlite3.IntegrityError as error:
-        raise ValueError("This pack name already exists for the user,"
-                         "or the Telegram short name is already in use.") from error
+            short_name = generate_telegram_short_name(candidate, user_id, bot_username,)
+
+            try:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO packs (
+                        user_id,
+                        pack_name,
+                        pack_title,
+                        telegram_short_name
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user_id, candidate, pack_title, short_name),
+                )
+
+                connection.commit()
+
+                return {
+                    "id": cursor.lastrowid,
+                    "user_id": user_id,
+                    "pack_name": candidate,
+                    "pack_title": pack_title,
+                    "telegram_short_name": short_name,
+                }
 
 
-def get_pack(user_id: int, pack_name: str):
-    """Find a pack by its owner's ID and internal name."""
+            except sqlite3.IntegrityError:
+                continue
 
-    pack_name = normalize_pack_name(pack_name)
-
-    with closing(get_connection()) as connection:
-        row = connection.execute(
-            """
-            SELECT *
-            FROM packs
-            WHERE user_id = ? AND pack_name = ?
-            """,
-            (user_id, pack_name),
-        ).fetchone()
-
-        return dict(row) if row else None
-
-
-def get_pack_by_short_name(telegram_short_name: str):
-    """Find a pack using its Telegram short name."""
-
-    with closing(get_connection()) as connection:
-        row = connection.execute(
-            """
-            SELECT *
-            FROM packs
-            WHERE telegram_short_name = ?
-            """,
-            (telegram_short_name,),
-        ).fetchone()
-
-        return dict(row) if row else None
+    raise ValueError("I couldn't generate a unique name for this pack.")
 
 
 def list_packs(user_id: int) -> list[dict]:
-    """Return all packs registered for one user."""
+    """Return all packs owned by the specified user ."""
 
     with closing(get_connection()) as connection:
         rows = connection.execute(
@@ -213,6 +191,22 @@ def list_packs(user_id: int) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def get_pack_by_id(user_id: int, pack_id: int):
+    """Find a pack only if it belongs to the specified user."""
+
+    with closing(get_connection()) as connection:
+        row = connection.execute(
+            """
+            SELECT id, user_id, pack_name, pack_title, telegram_short_name
+            FROM packs
+            WHERE id = ? AND user_id = ?
+            """,
+            (pack_id, user_id),
+        ).fetchone()
+
+        return dict(row) if row else None
+
+
 if __name__ == "__main__":
     initialize_database()
-    print("Database initialized successfully.")
+    print(f"Database initialized: {DATABASE_FILE}")
